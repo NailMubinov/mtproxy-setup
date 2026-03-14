@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  MTProxy installer — автоустановка с TLS-маскировкой
+#  MTProxy installer — автоустановка с TLS-маскировкой (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 #  Протестировано: Ubuntu 20.04 / 22.04 / Debian 11 / 12
 #  Использование: bash install_mtproxy.sh
 # =============================================================================
@@ -23,7 +23,7 @@ hdr()   { echo -e "\n${BOLD}${CYAN}══ $* ══${NC}"; }
 # ── Конфигурируемые параметры ─────────────────────────────────────────────────
 INSTALL_DIR="/opt/mtproxy"
 SERVICE_NAME="mtproxy"
-TLS_DOMAIN="yandex.ru"
+TLS_DOMAIN="yandex.ru"  # Можно изменить на любой популярный домен
 CANDIDATE_PORTS=(443 8443 2083 2087 8080 8888 3128)
 
 # ── Откат предыдущей установки ────────────────────────────────────────────────
@@ -51,19 +51,13 @@ cleanup_previous() {
 
     if [[ -d "$INSTALL_DIR" ]]; then
         # Читаем старый порт чтобы убрать из файрвола
-        local old_port=""
-        old_port=$(python3 -c "
-import re
-try:
-    txt = open('${INSTALL_DIR}/config.py').read()
-    m = re.search(r'PORT\s*=\s*(\d+)', txt)
-    if m: print(m.group(1))
-except: pass
-" 2>/dev/null) || true
-
-        if [[ -n "$old_port" ]]; then
-            iptables -D INPUT -p tcp --dport "$old_port" -j ACCEPT 2>/dev/null || true
-            ok "Правило iptables для порта $old_port удалено"
+        if [[ -f "${INSTALL_DIR}/config.py" ]]; then
+            local old_port=""
+            old_port=$(grep -Po 'PORT\s*=\s*\K\d+' "${INSTALL_DIR}/config.py" 2>/dev/null || true)
+            if [[ -n "$old_port" ]]; then
+                iptables -D INPUT -p tcp --dport "$old_port" -j ACCEPT 2>/dev/null || true
+                ok "Правило iptables для порта $old_port удалено"
+            fi
         fi
 
         rm -rf "$INSTALL_DIR"
@@ -119,7 +113,7 @@ open_firewall() {
     fi
 
     if command -v iptables &>/dev/null; then
-        if ! iptables -C INPUT -p tcp --dport "$port" -j ACCEPT &>/dev/null; then
+        if ! iptables -C INPUT -p tcp --dport "$port" -j ACCEPT &>/dev/null 2>&1; then
             iptables -I INPUT -p tcp --dport "${port}" -j ACCEPT || true
             if command -v netfilter-persistent &>/dev/null; then
                 netfilter-persistent save >/dev/null 2>&1 || true
@@ -158,33 +152,35 @@ install_deps() {
 # ── Установка mtprotoproxy ────────────────────────────────────────────────────
 install_proxy() {
     hdr "Установка mtprotoproxy"
+    if [[ -d "$INSTALL_DIR" ]]; then
+        rm -rf "$INSTALL_DIR"
+    fi
     git clone -q https://github.com/alexbers/mtprotoproxy.git "$INSTALL_DIR"
     ok "Репозиторий готов: $INSTALL_DIR"
 }
 
-# ── Генерация TLS-секрета ─────────────────────────────────────────────────────
-generate_secret() {
-    # В USERS кладём просто 32 hex-символа (16 байт) БЕЗ префикса ee
-    # Прокси сам добавляет ee при формировании tg:// ссылки
-    openssl rand -hex 16
-}
-
-# Итоговый секрет для tg:// ссылки = ee + 32hex + hex(домен)
-make_tls_link_secret() {
-    local base_secret="$1"   # 32 hex символа без префикса
-    local domain="$2"
+# ── Генерация секрета для TLS ─────────────────────────────────────────────────
+# В mtprotoproxy секрет должен быть в формате "ee" + 32 hex символа + hex домена
+generate_tls_secret() {
+    local domain="$1"
+    local random_part
     local domain_hex
+    
+    # Генерируем 16 байт (32 hex символа) случайных данных
+    random_part=$(openssl rand -hex 16)
+    
+    # Конвертируем домен в hex
     if command -v xxd &>/dev/null; then
         domain_hex=$(printf '%s' "$domain" | xxd -p | tr -d '\n')
     else
         domain_hex=$(python3 -c "import sys; print(sys.argv[1].encode().hex())" "$domain")
     fi
-    # Итоговый формат ссылки: ee + 32hex + hex(домен)
-    echo "ee${base_secret}${domain_hex}"
+    
+    # Формируем полный секрет: ee + random(32) + domain_hex
+    echo "ee${random_part}${domain_hex}"
 }
 
 # ── Запись конфига ────────────────────────────────────────────────────────────
-# mtprotoproxy читает USERS (dict имя->секрет) и TLS_DOMAIN, а не SECRET
 write_config() {
     local port="$1"
     local secret="$2"
@@ -196,8 +192,10 @@ write_config() {
 
 PORT = ${port}
 
-# Пользователи: имя -> секрет (формат ee... для TLS-маскировки)
-USERS = {"tg": "${secret}"}
+# Пользователи: имя -> секрет (для TLS маскировки секрет должен начинаться с "ee")
+USERS = {
+    "tg": "${secret}",
+}
 
 # TLS-домен: трафик маскируется под HTTPS к этому хосту
 TLS_DOMAIN = "${domain}"
@@ -206,6 +204,11 @@ TLS_DOMAIN = "${domain}"
 MODES = {"classic": False, "secure": False, "tls": True}
 EOF
     ok "Конфиг записан: ${INSTALL_DIR}/config.py"
+    
+    # Проверяем формат секрета
+    if [[ ! "$secret" =~ ^ee ]]; then
+        warn "Секрет не начинается с 'ee'! TLS может не работать."
+    fi
 }
 
 # ── Systemd-сервис ────────────────────────────────────────────────────────────
@@ -218,6 +221,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=nobody
+Group=nogroup
 ExecStart=/usr/bin/python3 ${INSTALL_DIR}/mtprotoproxy.py ${INSTALL_DIR}/config.py
 WorkingDirectory=${INSTALL_DIR}
 Restart=always
@@ -227,21 +232,32 @@ StandardError=journal
 SyslogIdentifier=mtproxy
 MemoryMax=512M
 
+# Безопасность
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=${INSTALL_DIR}
+
 [Install]
 WantedBy=multi-user.target
 EOF
 
+    # Устанавливаем правильные права
+    chown -R nobody:nogroup "$INSTALL_DIR" 2>/dev/null || chown -R root:root "$INSTALL_DIR"
+    chmod 755 "$INSTALL_DIR"
+    
     systemctl daemon-reload
     systemctl enable "${SERVICE_NAME}" >/dev/null 2>&1
     systemctl restart "${SERVICE_NAME}"
-    sleep 2
+    sleep 3
 
     if systemctl is-active --quiet "${SERVICE_NAME}"; then
         ok "Сервис запущен и добавлен в автозагрузку"
     else
         warn "Сервис завершился с ошибкой. Последние логи:"
-        journalctl -u "${SERVICE_NAME}" -n 20 --no-pager
-        fatal "Не удалось запустить mtproxy"
+        journalctl -u "${SERVICE_NAME}" -n 30 --no-pager
+        fatal "Не удалось запустить mtproxy. Проверьте логи выше."
     fi
 }
 
@@ -251,7 +267,7 @@ EOF
 main() {
     echo -e "${BOLD}"
     echo "╔══════════════════════════════════════════════╗"
-    echo "║     MTProxy — автоустановщик v1.3            ║"
+    echo "║     MTProxy — автоустановщик v1.4            ║"
     echo "║  Telegram MTProto + TLS fake-domain masking  ║"
     echo "╚══════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -270,9 +286,9 @@ main() {
     install_deps
     install_proxy
 
-    hdr "Генерация секрета (TLS fake-domain: $TLS_DOMAIN)"
-    PROXY_SECRET=$(generate_secret)
-    ok "Секрет (базовый): $PROXY_SECRET"
+    hdr "Генерация TLS-секрета (домен: $TLS_DOMAIN)"
+    PROXY_SECRET=$(generate_tls_secret "$TLS_DOMAIN")
+    ok "Секрет сгенерирован"
 
     hdr "Запись конфигурации"
     write_config "$SERVER_PORT" "$PROXY_SECRET" "$TLS_DOMAIN"
@@ -283,32 +299,46 @@ main() {
     hdr "Запуск сервиса"
     create_service
 
-    LINK_SECRET=$(make_tls_link_secret "$PROXY_SECRET" "$TLS_DOMAIN")
-    TG_LINK="tg://proxy?server=${SERVER_IP}&port=${SERVER_PORT}&secret=${LINK_SECRET}"
-    TME_LINK="https://t.me/proxy?server=${SERVER_IP}&port=${SERVER_PORT}&secret=${LINK_SECRET}"
+    TG_LINK="tg://proxy?server=${SERVER_IP}&port=${SERVER_PORT}&secret=${PROXY_SECRET}"
+    TME_LINK="https://t.me/proxy?server=${SERVER_IP}&port=${SERVER_PORT}&secret=${PROXY_SECRET}"
 
     INFO_FILE="${INSTALL_DIR}/proxy_info.txt"
     cat > "$INFO_FILE" << EOF
-MTProxy — данные подключения
+╔════════════════════════════════════════════════════════════════╗
+║                 MTProxy — данные подключения                   ║
+╚════════════════════════════════════════════════════════════════╝
+
 Установлено: $(date '+%Y-%m-%d %H:%M:%S')
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Параметры подключения:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Сервер:     ${SERVER_IP}
 Порт:       ${SERVER_PORT}
-Секрет (базовый): ${PROXY_SECRET}
-Секрет (ссылка):  ${LINK_SECRET}
+Секрет:     ${PROXY_SECRET}
 TLS-домен:  ${TLS_DOMAIN}
 
-tg:// ссылка (для мобильных клиентов):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Ссылки для подключения:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📱 tg:// (для мобильных клиентов):
 ${TG_LINK}
 
-t.me ссылка (для браузера / передачи):
+🌐 t.me (для браузера/передачи):
 ${TME_LINK}
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Управление сервисом:
-  systemctl status  ${SERVICE_NAME}
-  systemctl restart ${SERVICE_NAME}
-  systemctl stop    ${SERVICE_NAME}
-  journalctl -u ${SERVICE_NAME} -f
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Проверить статус:  systemctl status ${SERVICE_NAME}
+Перезапустить:     systemctl restart ${SERVICE_NAME}
+Остановить:        systemctl stop ${SERVICE_NAME}
+Логи в реальном времени: journalctl -u ${SERVICE_NAME} -f
+
+Конфиг:            ${INSTALL_DIR}/config.py
+Этот файл:         ${INFO_FILE}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EOF
 
     echo ""
@@ -317,23 +347,29 @@ EOF
     echo "║                   ✓  УСТАНОВКА ЗАВЕРШЕНА                            ║"
     echo "╚══════════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
-    printf "  %-14s %s\n" "Сервер:"    "$SERVER_IP"
-    printf "  %-14s %s\n" "Порт:"      "$SERVER_PORT"
-    printf "  %-14s %s\n" "TLS-домен:" "$TLS_DOMAIN"
     echo ""
-    echo -e "  ${BOLD}${YELLOW}Ссылка для подключения:${NC}"
-    echo -e "  ${BOLD}${CYAN}${TG_LINK}${NC}"
+    printf "  ${BOLD}%-12s${NC} %s\n" "Сервер:"    "$SERVER_IP"
+    printf "  ${BOLD}%-12s${NC} %s\n" "Порт:"      "$SERVER_PORT"
+    printf "  ${BOLD}%-12s${NC} %s\n" "TLS-домен:" "$TLS_DOMAIN"
     echo ""
-    echo -e "  ${BOLD}Ссылка t.me (для браузера):${NC}"
+    echo -e "  ${BOLD}${YELLOW}📱 Ссылка для Telegram:${NC}"
+    echo -e "  ${CYAN}${TG_LINK}${NC}"
+    echo ""
+    echo -e "  ${BOLD}🌐 Ссылка t.me (для браузера):${NC}"
     echo -e "  ${CYAN}${TME_LINK}${NC}"
     echo ""
-    echo -e "  Данные сохранены: ${BOLD}$INFO_FILE${NC}"
+    echo -e "  ${BOLD}📄 Данные сохранены:${NC} ${INFO_FILE}"
     echo ""
-    echo -e "  ${BOLD}Управление:${NC}"
-    echo -e "  systemctl status  $SERVICE_NAME"
-    echo -e "  systemctl restart $SERVICE_NAME"
-    echo -e "  journalctl -u $SERVICE_NAME -f"
+    echo -e "  ${BOLD}🔄 Проверка статуса:${NC} systemctl status $SERVICE_NAME"
     echo ""
+    
+    # Финальная проверка
+    sleep 2
+    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+        ok "Прокси работает и готов к использованию!"
+    else
+        warn "Прокси не запустился. Проверьте логи: journalctl -u $SERVICE_NAME -f"
+    fi
 }
 
 main "$@"
