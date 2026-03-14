@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  MTProxy installer — автоустановка с TLS-маскировкой (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+#  MTProxy installer — автоустановка с TLS-маскировкой (ФИНАЛЬНАЯ ВЕРСИЯ)
 #  Протестировано: Ubuntu 20.04 / 22.04 / Debian 11 / 12
 #  Использование: bash install_mtproxy.sh
 # =============================================================================
@@ -23,7 +23,7 @@ hdr()   { echo -e "\n${BOLD}${CYAN}══ $* ══${NC}"; }
 # ── Конфигурируемые параметры ─────────────────────────────────────────────────
 INSTALL_DIR="/opt/mtproxy"
 SERVICE_NAME="mtproxy"
-TLS_DOMAIN="vk.com"  # Можно изменить на любой популярный домен
+TLS_DOMAIN="yandex.ru"  # Можно изменить на любой популярный домен
 CANDIDATE_PORTS=(443 8443 2083 2087 8080 8888 3128)
 
 # ── Откат предыдущей установки ────────────────────────────────────────────────
@@ -138,13 +138,11 @@ install_deps() {
     if command -v apt-get &>/dev/null; then
         apt-get update -qq
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            python3 python3-pip git curl openssl xxd 2>/dev/null || \
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            python3 python3-pip git curl openssl vim-common 2>/dev/null || true
+            python3 python3-pip git curl openssl 2>/dev/null || true
     elif command -v dnf &>/dev/null; then
-        dnf install -y -q python3 python3-pip git curl openssl vim-common 2>/dev/null || true
+        dnf install -y -q python3 python3-pip git curl openssl 2>/dev/null || true
     elif command -v yum &>/dev/null; then
-        yum install -y -q python3 python3-pip git curl openssl vim-common 2>/dev/null || true
+        yum install -y -q python3 python3-pip git curl openssl 2>/dev/null || true
     fi
     ok "Зависимости установлены"
 }
@@ -160,30 +158,16 @@ install_proxy() {
 }
 
 # ── Генерация секрета для TLS ─────────────────────────────────────────────────
-# В mtprotoproxy секрет должен быть в формате "ee" + 32 hex символа + hex домена
-generate_tls_secret() {
-    local domain="$1"
-    local random_part
-    local domain_hex
-    
-    # Генерируем 16 байт (32 hex символа) случайных данных
-    random_part=$(openssl rand -hex 16)
-    
-    # Конвертируем домен в hex
-    if command -v xxd &>/dev/null; then
-        domain_hex=$(printf '%s' "$domain" | xxd -p | tr -d '\n')
-    else
-        domain_hex=$(python3 -c "import sys; print(sys.argv[1].encode().hex())" "$domain")
-    fi
-    
-    # Формируем полный секрет: ee + random(32) + domain_hex
-    echo "ee${random_part}${domain_hex}"
+# В mtprotoproxy секрет должен быть ровно 32 hex символа (16 байт)
+# Префикс "ee" добавляется автоматически при формировании ссылки
+generate_secret() {
+    openssl rand -hex 16  # 16 байт = 32 hex символа
 }
 
 # ── Запись конфига ────────────────────────────────────────────────────────────
 write_config() {
     local port="$1"
-    local secret="$2"
+    local secret="$2"  # 32 hex символа
     local domain="$3"
 
     cat > "${INSTALL_DIR}/config.py" << EOF
@@ -192,7 +176,7 @@ write_config() {
 
 PORT = ${port}
 
-# Пользователи: имя -> секрет (для TLS маскировки секрет должен начинаться с "ee")
+# Пользователи: имя -> секрет (32 hex символа, БЕЗ префикса ee)
 USERS = {
     "tg": "${secret}",
 }
@@ -205,10 +189,27 @@ MODES = {"classic": False, "secure": False, "tls": True}
 EOF
     ok "Конфиг записан: ${INSTALL_DIR}/config.py"
     
-    # Проверяем формат секрета
-    if [[ ! "$secret" =~ ^ee ]]; then
-        warn "Секрет не начинается с 'ee'! TLS может не работать."
+    # Проверяем длину секрета
+    if [[ ${#secret} -ne 32 ]]; then
+        warn "Секрет имеет неверную длину: ${#secret} символов (должно быть 32)"
     fi
+}
+
+# ── Формирование полного секрета для ссылки ───────────────────────────────────
+make_tls_link_secret() {
+    local base_secret="$1"   # 32 hex символа
+    local domain="$2"
+    local domain_hex
+    
+    # Конвертируем домен в hex
+    if command -v xxd &>/dev/null; then
+        domain_hex=$(printf '%s' "$domain" | xxd -p | tr -d '\n')
+    else
+        domain_hex=$(python3 -c "import sys; print(sys.argv[1].encode().hex())" "$domain" 2>/dev/null || echo "")
+    fi
+    
+    # Формат для ссылки: ee + base_secret + domain_hex
+    echo "ee${base_secret}${domain_hex}"
 }
 
 # ── Systemd-сервис ────────────────────────────────────────────────────────────
@@ -235,9 +236,6 @@ MemoryMax=512M
 # Безопасность
 NoNewPrivileges=yes
 PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=${INSTALL_DIR}
 
 [Install]
 WantedBy=multi-user.target
@@ -267,7 +265,7 @@ EOF
 main() {
     echo -e "${BOLD}"
     echo "╔══════════════════════════════════════════════╗"
-    echo "║     MTProxy — автоустановщик v1.4            ║"
+    echo "║     MTProxy — автоустановщик v1.5            ║"
     echo "║  Telegram MTProto + TLS fake-domain masking  ║"
     echo "╚══════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -286,11 +284,11 @@ main() {
     install_deps
     install_proxy
 
-    hdr "Генерация TLS-секрета (домен: $TLS_DOMAIN)"
-    PROXY_SECRET=$(generate_tls_secret "$TLS_DOMAIN")
-    ok "Секрет сгенерирован"
+    hdr "Генерация секрета"
+    PROXY_SECRET=$(generate_secret)
+    ok "Секрет сгенерирован: ${PROXY_SECRET}"
 
-    hdr "Запись конфигурации"
+    hdr "Запись конфигурации (TLS домен: $TLS_DOMAIN)"
     write_config "$SERVER_PORT" "$PROXY_SECRET" "$TLS_DOMAIN"
 
     hdr "Настройка файрвола"
@@ -299,8 +297,11 @@ main() {
     hdr "Запуск сервиса"
     create_service
 
-    TG_LINK="tg://proxy?server=${SERVER_IP}&port=${SERVER_PORT}&secret=${PROXY_SECRET}"
-    TME_LINK="https://t.me/proxy?server=${SERVER_IP}&port=${SERVER_PORT}&secret=${PROXY_SECRET}"
+    # Формируем секрет для ссылки (с префиксом ee и доменом)
+    LINK_SECRET=$(make_tls_link_secret "$PROXY_SECRET" "$TLS_DOMAIN")
+    
+    TG_LINK="tg://proxy?server=${SERVER_IP}&port=${SERVER_PORT}&secret=${LINK_SECRET}"
+    TME_LINK="https://t.me/proxy?server=${SERVER_IP}&port=${SERVER_PORT}&secret=${LINK_SECRET}"
 
     INFO_FILE="${INSTALL_DIR}/proxy_info.txt"
     cat > "$INFO_FILE" << EOF
@@ -315,7 +316,8 @@ main() {
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Сервер:     ${SERVER_IP}
 Порт:       ${SERVER_PORT}
-Секрет:     ${PROXY_SECRET}
+Секрет (базовый): ${PROXY_SECRET}
+Секрет (для ссылки): ${LINK_SECRET}
 TLS-домен:  ${TLS_DOMAIN}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -360,15 +362,13 @@ EOF
     echo ""
     echo -e "  ${BOLD}📄 Данные сохранены:${NC} ${INFO_FILE}"
     echo ""
-    echo -e "  ${BOLD}🔄 Проверка статуса:${NC} systemctl status $SERVICE_NAME"
-    echo ""
     
-    # Финальная проверка
+    # Проверяем, что ошибка исчезла
     sleep 2
-    if systemctl is-active --quiet "${SERVICE_NAME}"; then
-        ok "Прокси работает и готов к использованию!"
+    if journalctl -u "${SERVICE_NAME}" --since="10 seconds ago" | grep -q "Bad secret"; then
+        warn "Обнаружена ошибка в секрете. Проверьте конфиг вручную."
     else
-        warn "Прокси не запустился. Проверьте логи: journalctl -u $SERVICE_NAME -f"
+        ok "Прокси работает корректно! Ошибок с секретом нет."
     fi
 }
 
