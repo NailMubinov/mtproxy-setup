@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  MTProxy installer — автоустановка с TLS-маскировкой (ФИНАЛЬНАЯ ВЕРСИЯ)
+#  MTProxy installer — автоустановка с TLS-маскировкой (ФИНАЛЬНАЯ ВЕРСИЯ 2)
 #  Протестировано: Ubuntu 20.04 / 22.04 / Debian 11 / 12
 #  Использование: bash install_mtproxy.sh
 # =============================================================================
@@ -23,7 +23,7 @@ hdr()   { echo -e "\n${BOLD}${CYAN}══ $* ══${NC}"; }
 # ── Конфигурируемые параметры ─────────────────────────────────────────────────
 INSTALL_DIR="/opt/mtproxy"
 SERVICE_NAME="mtproxy"
-TLS_DOMAIN="vk.com"  # Можно изменить на любой популярный домен
+TLS_DOMAIN="vk.com"  # Изменено на vk.com
 CANDIDATE_PORTS=(443 8443 2083 2087 8080 8888 3128)
 
 # ── Откат предыдущей установки ────────────────────────────────────────────────
@@ -50,16 +50,6 @@ cleanup_previous() {
     fi
 
     if [[ -d "$INSTALL_DIR" ]]; then
-        # Читаем старый порт чтобы убрать из файрвола
-        if [[ -f "${INSTALL_DIR}/config.py" ]]; then
-            local old_port=""
-            old_port=$(grep -Po 'PORT\s*=\s*\K\d+' "${INSTALL_DIR}/config.py" 2>/dev/null || true)
-            if [[ -n "$old_port" ]]; then
-                iptables -D INPUT -p tcp --dport "$old_port" -j ACCEPT 2>/dev/null || true
-                ok "Правило iptables для порта $old_port удалено"
-            fi
-        fi
-
         rm -rf "$INSTALL_DIR"
         ok "Директория $INSTALL_DIR удалена"
         found=1
@@ -138,11 +128,11 @@ install_deps() {
     if command -v apt-get &>/dev/null; then
         apt-get update -qq
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            python3 python3-pip git curl openssl 2>/dev/null || true
+            python3 python3-pip git curl openssl xxd 2>/dev/null || true
     elif command -v dnf &>/dev/null; then
-        dnf install -y -q python3 python3-pip git curl openssl 2>/dev/null || true
+        dnf install -y -q python3 python3-pip git curl openssl vim-common 2>/dev/null || true
     elif command -v yum &>/dev/null; then
-        yum install -y -q python3 python3-pip git curl openssl 2>/dev/null || true
+        yum install -y -q python3 python3-pip git curl openssl vim-common 2>/dev/null || true
     fi
     ok "Зависимости установлены"
 }
@@ -157,19 +147,24 @@ install_proxy() {
     ok "Репозиторий готов: $INSTALL_DIR"
 }
 
-# ── Генерация секрета для TLS ─────────────────────────────────────────────────
-# В mtprotoproxy секрет должен быть ровно 32 hex символа (16 байт)
-# Префикс "ee" добавляется автоматически при формировании ссылки
+# ── Генерация секрета ─────────────────────────────────────────────────────────
+# Генерируем ровно 32 hex символа (16 байт) - БЕЗ префикса ee
 generate_secret() {
-    openssl rand -hex 16  # 16 байт = 32 hex символа
+    openssl rand -hex 16
 }
 
 # ── Запись конфига ────────────────────────────────────────────────────────────
 write_config() {
     local port="$1"
-    local secret="$2"  # 32 hex символа
+    local secret="$2"  # Должно быть 32 hex символа
     local domain="$3"
 
+    # Создаем резервную копию оригинального конфига если есть
+    if [[ -f "${INSTALL_DIR}/config.py" ]]; then
+        mv "${INSTALL_DIR}/config.py" "${INSTALL_DIR}/config.py.bak"
+    fi
+
+    # Записываем новый конфиг
     cat > "${INSTALL_DIR}/config.py" << EOF
 # MTProxy config — сгенерировано install_mtproxy.sh
 # Дата: $(date '+%Y-%m-%d %H:%M:%S')
@@ -187,12 +182,17 @@ TLS_DOMAIN = "${domain}"
 # Включить только TLS-режим (рекомендуется)
 MODES = {"classic": False, "secure": False, "tls": True}
 EOF
-    ok "Конфиг записан: ${INSTALL_DIR}/config.py"
+
+    # Проверяем что записалось
+    info "Содержимое конфига:"
+    grep -v "^#" "${INSTALL_DIR}/config.py" | grep -v "^$" | sed 's/^/  /'
     
     # Проверяем длину секрета
     if [[ ${#secret} -ne 32 ]]; then
-        warn "Секрет имеет неверную длину: ${#secret} символов (должно быть 32)"
+        fatal "ОШИБКА: Секрет имеет неверную длину: ${#secret} (должно быть 32)"
     fi
+    
+    ok "Конфиг записан: ${INSTALL_DIR}/config.py"
 }
 
 # ── Формирование полного секрета для ссылки ───────────────────────────────────
@@ -205,7 +205,7 @@ make_tls_link_secret() {
     if command -v xxd &>/dev/null; then
         domain_hex=$(printf '%s' "$domain" | xxd -p | tr -d '\n')
     else
-        domain_hex=$(python3 -c "import sys; print(sys.argv[1].encode().hex())" "$domain" 2>/dev/null || echo "")
+        domain_hex=$(python3 -c "import sys; print(sys.argv[1].encode().hex())" "$domain")
     fi
     
     # Формат для ссылки: ee + base_secret + domain_hex
@@ -236,6 +236,9 @@ MemoryMax=512M
 # Безопасность
 NoNewPrivileges=yes
 PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=${INSTALL_DIR}
 
 [Install]
 WantedBy=multi-user.target
@@ -265,8 +268,8 @@ EOF
 main() {
     echo -e "${BOLD}"
     echo "╔══════════════════════════════════════════════╗"
-    echo "║     MTProxy — автоустановщик v1.5            ║"
-    echo "║  Telegram MTProto + TLS fake-domain masking  ║"
+    echo "║     MTProxy — автоустановщик v1.6            ║"
+    echo "║  Telegram MTProto + TLS (vk.com маскировка)  ║"
     echo "╚══════════════════════════════════════════════╝"
     echo -e "${NC}"
 
@@ -286,7 +289,7 @@ main() {
 
     hdr "Генерация секрета"
     PROXY_SECRET=$(generate_secret)
-    ok "Секрет сгенерирован: ${PROXY_SECRET}"
+    ok "Секрет сгенерирован (32 hex): ${PROXY_SECRET}"
 
     hdr "Запись конфигурации (TLS домен: $TLS_DOMAIN)"
     write_config "$SERVER_PORT" "$PROXY_SECRET" "$TLS_DOMAIN"
@@ -316,9 +319,10 @@ main() {
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Сервер:     ${SERVER_IP}
 Порт:       ${SERVER_PORT}
-Секрет (базовый): ${PROXY_SECRET}
-Секрет (для ссылки): ${LINK_SECRET}
 TLS-домен:  ${TLS_DOMAIN}
+
+Секрет (в конфиге): ${PROXY_SECRET}
+Секрет (в ссылке):  ${LINK_SECRET}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Ссылки для подключения:
@@ -354,21 +358,27 @@ EOF
     printf "  ${BOLD}%-12s${NC} %s\n" "Порт:"      "$SERVER_PORT"
     printf "  ${BOLD}%-12s${NC} %s\n" "TLS-домен:" "$TLS_DOMAIN"
     echo ""
+    printf "  ${BOLD}%-12s${NC} %s\n" "Секрет:"    "${PROXY_SECRET:0:16}... (обрезан)"
+    echo ""
     echo -e "  ${BOLD}${YELLOW}📱 Ссылка для Telegram:${NC}"
     echo -e "  ${CYAN}${TG_LINK}${NC}"
-    echo ""
-    echo -e "  ${BOLD}🌐 Ссылка t.me (для браузера):${NC}"
-    echo -e "  ${CYAN}${TME_LINK}${NC}"
     echo ""
     echo -e "  ${BOLD}📄 Данные сохранены:${NC} ${INFO_FILE}"
     echo ""
     
     # Проверяем, что ошибка исчезла
-    sleep 2
+    sleep 3
     if journalctl -u "${SERVICE_NAME}" --since="10 seconds ago" | grep -q "Bad secret"; then
-        warn "Обнаружена ошибка в секрете. Проверьте конфиг вручную."
+        warn "Обнаружена ошибка в секрете! Проверяем конфиг:"
+        echo ""
+        echo "=== Содержимое конфига ==="
+        cat "${INSTALL_DIR}/config.py"
+        echo "=========================="
+        echo ""
+        warn "Ожидается секрет из 32 hex символов, например: $(openssl rand -hex 16)"
+        fatal "Пожалуйста, проверьте конфиг вручную"
     else
-        ok "Прокси работает корректно! Ошибок с секретом нет."
+        ok "ПРОКСИ РАБОТАЕТ КОРРЕКТНО! Ошибок с секретом нет."
     fi
 }
 
