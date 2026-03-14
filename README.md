@@ -1,6 +1,6 @@
 # MTProxy — автоустановщик для Telegram
 
-Bash-скрипт для быстрой установки [MTProto-прокси](https://github.com/alexbers/mtprotoproxy) на VPS. Одна команда — готовая ссылка `tg://proxy`.
+Bash-скрипт для быстрой установки [MTProto-прокси](https://github.com/NailMubinov/mtproxy-setup) на VPS. Одна команда — готовая ссылка `tg://proxy`.
 
 **Возможности:**
 - Автоматически выбирает свободный порт (443 → 8443 → 2083 → и т.д.)
@@ -18,7 +18,7 @@ Bash-скрипт для быстрой установки [MTProto-прокси
 Запустите от root на вашем VPS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ВЫ/РЕПО/main/install_mtproxy.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/NailMubinov/mtproxy-setup/main/install_mtproxy.sh | sudo bash
 ```
 
 Через 1–2 минуты скрипт выведет ссылку вида:
@@ -36,7 +36,7 @@ tg://proxy?server=23.94.131.195&port=8443&secret=ee7f3a...
 1. Определяется публичный IP сервера
 2. Находится первый свободный порт из списка: `443, 8443, 2083, 2087, 8080, 8888, 3128`
 3. Устанавливаются зависимости (`python3`, `git`, `openssl`)
-4. Клонируется [alexbers/mtprotoproxy](https://github.com/alexbers/mtprotoproxy)
+4. Клонируется [NailMubinov/mtproxy-setup](https://github.com/NailMubinov/mtproxy-setup)
 5. Генерируется TLS-секрет с маскировкой под `yandex.ru`
 6. Открывается порт в файрволе
 7. Создаётся и запускается systemd-сервис
