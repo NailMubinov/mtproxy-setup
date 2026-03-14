@@ -50,10 +50,10 @@ cleanup_previous() {
     fi
 
     if [[ -d "$INSTALL_DIR" ]]; then
-        # Сохраняем старый порт чтобы убрать из файрвола
+        # Читаем старый порт чтобы убрать из файрвола
         local old_port=""
         old_port=$(python3 -c "
-import re, sys
+import re
 try:
     txt = open('${INSTALL_DIR}/config.py').read()
     m = re.search(r'PORT\s*=\s*(\d+)', txt)
@@ -175,13 +175,16 @@ generate_secret() {
         domain_hex=$(python3 -c "import sys; print(sys.argv[1].encode().hex())" "$domain")
     fi
 
+    # ee + 16 случайных байт + hex домена
     echo "ee${base_secret}${domain_hex}"
 }
 
 # ── Запись конфига ────────────────────────────────────────────────────────────
+# mtprotoproxy читает USERS (dict имя->секрет) и TLS_DOMAIN, а не SECRET
 write_config() {
     local port="$1"
     local secret="$2"
+    local domain="$3"
 
     cat > "${INSTALL_DIR}/config.py" << EOF
 # MTProxy config — сгенерировано install_mtproxy.sh
@@ -189,14 +192,14 @@ write_config() {
 
 PORT = ${port}
 
-# TLS-секрет: маскировка трафика под HTTPS (fake-TLS, домен ${TLS_DOMAIN})
-SECRET = "${secret}"
+# Пользователи: имя -> секрет (формат ee... для TLS-маскировки)
+USERS = {"tg": "${secret}"}
 
-# Раскомментируйте для нескольких пользователей с разными секретами:
-# USERS = {
-#     "user1": "секрет1",
-#     "user2": "секрет2",
-# }
+# TLS-домен: трафик маскируется под HTTPS к этому хосту
+TLS_DOMAIN = "${domain}"
+
+# Включить только TLS-режим (рекомендуется)
+MODES = {"classic": False, "secure": False, "tls": True}
 EOF
     ok "Конфиг записан: ${INSTALL_DIR}/config.py"
 }
@@ -244,12 +247,11 @@ EOF
 main() {
     echo -e "${BOLD}"
     echo "╔══════════════════════════════════════════════╗"
-    echo "║     MTProxy — автоустановщик v1.2            ║"
+    echo "║     MTProxy — автоустановщик v1.3            ║"
     echo "║  Telegram MTProto + TLS fake-domain masking  ║"
     echo "╚══════════════════════════════════════════════╝"
     echo -e "${NC}"
 
-    # Откат предыдущей установки если есть
     cleanup_previous
 
     hdr "Определение IP-адреса"
@@ -269,7 +271,7 @@ main() {
     ok "Секрет: $PROXY_SECRET"
 
     hdr "Запись конфигурации"
-    write_config "$SERVER_PORT" "$PROXY_SECRET"
+    write_config "$SERVER_PORT" "$PROXY_SECRET" "$TLS_DOMAIN"
 
     hdr "Настройка файрвола"
     open_firewall "$SERVER_PORT"
