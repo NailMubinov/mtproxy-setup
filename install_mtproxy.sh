@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  MTProxy installer — автоустановка с TLS-маскировкой (ИСПРАВЛЕННАЯ)
+#  MTProxy installer — автоустановка с TLS-маскировкой (ФИНАЛЬНАЯ)
 #  Протестировано: Ubuntu 20.04 / 22.04 / Debian 11 / 12
 #  Использование: bash install_mtproxy.sh
 # =============================================================================
@@ -24,7 +24,8 @@ hdr()   { echo -e "\n${BOLD}${CYAN}══ $* ══${NC}"; }
 INSTALL_DIR="/opt/mtproxy"
 SERVICE_NAME="mtproxy"
 TLS_DOMAIN="vk.com"
-CANDIDATE_PORTS=(443 8443 2083 2087 8080 8888 3128)
+# Используем порты выше 1024, чтобы избежать проблем с правами
+CANDIDATE_PORTS=(8443 8448 8888 8080 2083 2087 3128 8443 9443 10443)
 
 # ── Откат предыдущей установки ────────────────────────────────────────────────
 cleanup_previous() {
@@ -47,6 +48,11 @@ cleanup_previous() {
         systemctl daemon-reload
         ok "Юнит удалён"
         found=1
+    fi
+
+    if id -u mtproxy &>/dev/null; then
+        userdel mtproxy 2>/dev/null || true
+        ok "Пользователь mtproxy удалён"
     fi
 
     if [[ -d "$INSTALL_DIR" ]]; then
@@ -79,7 +85,7 @@ pick_free_port() {
         warn "Порт $port занят, пробую следующий..."
     done
     local rand_port
-    rand_port=$(shuf -i 10000-60000 -n 1)
+    rand_port=$(shuf -i 20000-60000 -n 1)
     warn "Все стандартные порты заняты. Используется случайный: $rand_port"
     echo "$rand_port"
 }
@@ -172,7 +178,6 @@ TLS_DOMAIN = "${domain}"
 MODES = {"classic": False, "secure": False, "tls": True}
 EOF
 
-    # Проверяем длину секрета
     if [[ ${#secret} -ne 32 ]]; then
         fatal "ОШИБКА: Секрет имеет неверную длину: ${#secret} (должно быть 32)"
     fi
@@ -195,7 +200,7 @@ make_tls_link_secret() {
     echo "ee${base_secret}${domain_hex}"
 }
 
-# ── Systemd-сервис (исправленная версия) ─────────────────────────────────────
+# ── Systemd-сервис (запуск от root, но с ограничениями) ─────────────────────
 create_service() {
     # Создаем пользователя если не существует
     if ! id -u mtproxy &>/dev/null; then
@@ -207,6 +212,12 @@ create_service() {
     chown -R mtproxy:mtproxy "$INSTALL_DIR"
     chmod 755 "$INSTALL_DIR"
     chmod 644 "${INSTALL_DIR}/config.py"
+
+    # Даем пользователю возможность использовать низкие порты (если нужно)
+    if [[ $SERVER_PORT -lt 1024 ]]; then
+        setcap 'cap_net_bind_service=+ep' /usr/bin/python3 || true
+        warn "Порт $SERVER_PORT ниже 1024, выданы дополнительные привилегии Python"
+    fi
 
     cat > "/etc/systemd/system/${SERVICE_NAME}.service" << EOF
 [Unit]
@@ -232,7 +243,6 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
 ProtectHome=yes
-ReadWritePaths=${INSTALL_DIR}
 
 [Install]
 WantedBy=multi-user.target
@@ -258,7 +268,7 @@ EOF
 main() {
     echo -e "${BOLD}"
     echo "╔══════════════════════════════════════════════╗"
-    echo "║     MTProxy — автоустановщик v1.7            ║"
+    echo "║     MTProxy — автоустановщик v1.8            ║"
     echo "║  Telegram MTProto + TLS (vk.com маскировка)  ║"
     echo "╚══════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -340,9 +350,11 @@ EOF
     # Проверяем статус
     sleep 2
     if systemctl is-active --quiet "${SERVICE_NAME}"; then
-        ok "ПРОКСИ УСПЕШНО ЗАПУЩЕН И РАБОТАЕТ!"
+        ok "✅ ПРОКСИ УСПЕШНО ЗАПУЩЕН И РАБОТАЕТ!"
+        echo ""
+        echo -e "  ${BOLD}Для проверки подключения используйте ссылку выше${NC}"
     else
-        warn "Прокси не запустился. Последние логи:"
+        warn "❌ Прокси не запустился. Последние логи:"
         journalctl -u "${SERVICE_NAME}" -n 20 --no-pager
     fi
 }
