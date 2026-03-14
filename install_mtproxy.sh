@@ -164,16 +164,14 @@ install_proxy() {
 
 # ── Генерация TLS-секрета ─────────────────────────────────────────────────────
 generate_secret() {
-    # В USERS кладём только "ee" + 16 байт (32 hex-символа)
-    # TLS_DOMAIN прокси подставляет сам при формировании ссылки
-    local base_secret
-    base_secret=$(openssl rand -hex 16)
-    echo "ee${base_secret}"
+    # В USERS кладём просто 32 hex-символа (16 байт) БЕЗ префикса ee
+    # Прокси сам добавляет ee при формировании tg:// ссылки
+    openssl rand -hex 16
 }
 
-# Итоговый секрет для tg:// ссылки = ee + base + hex(domain)
+# Итоговый секрет для tg:// ссылки = ee + 32hex + hex(домен)
 make_tls_link_secret() {
-    local base_secret="$1"   # ee + 32 hex
+    local base_secret="$1"   # 32 hex символа без префикса
     local domain="$2"
     local domain_hex
     if command -v xxd &>/dev/null; then
@@ -181,7 +179,8 @@ make_tls_link_secret() {
     else
         domain_hex=$(python3 -c "import sys; print(sys.argv[1].encode().hex())" "$domain")
     fi
-    echo "${base_secret}${domain_hex}"
+    # Итоговый формат ссылки: ee + 32hex + hex(домен)
+    echo "ee${base_secret}${domain_hex}"
 }
 
 # ── Запись конфига ────────────────────────────────────────────────────────────
