@@ -24,8 +24,8 @@ hdr()   { echo -e "\n${BOLD}${CYAN}══ $* ══${NC}"; }
 INSTALL_DIR="/opt/mtproxy"
 SERVICE_NAME="mtproxy"
 TLS_DOMAIN="vk.com"
-# Используем порты выше 1024, чтобы избежать проблем с правами
-CANDIDATE_PORTS=(8443 8448 8888 8080 2083 2087 3128 8443 9443 10443)
+# Только порты выше 1024 (убрал 443)
+CANDIDATE_PORTS=(8443 8448 8888 8080 2083 2087 3128 9443 10443 11443 12443)
 
 # ── Откат предыдущей установки ────────────────────────────────────────────────
 cleanup_previous() {
@@ -77,17 +77,28 @@ detect_ip() {
 
 # ── Выбор свободного порта ────────────────────────────────────────────────────
 pick_free_port() {
+    local port
     for port in "${CANDIDATE_PORTS[@]}"; do
+        if [[ $port -lt 1024 ]]; then
+            warn "Порт $port ниже 1024, пропускаем (требуются root права)"
+            continue
+        fi
         if ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
             echo "$port"
             return 0
         fi
         warn "Порт $port занят, пробую следующий..."
     done
-    local rand_port
-    rand_port=$(shuf -i 20000-60000 -n 1)
-    warn "Все стандартные порты заняты. Используется случайный: $rand_port"
-    echo "$rand_port"
+    
+    # Если все порты заняты, генерируем случайный порт выше 1024
+    while true; do
+        local rand_port
+        rand_port=$(shuf -i 20000-60000 -n 1)
+        if ! ss -tlnp 2>/dev/null | grep -q ":${rand_port} "; then
+            echo "$rand_port"
+            return 0
+        fi
+    done
 }
 
 # ── Открытие порта в файрволе ─────────────────────────────────────────────────
@@ -182,7 +193,11 @@ EOF
         fatal "ОШИБКА: Секрет имеет неверную длину: ${#secret} (должно быть 32)"
     fi
     
-    ok "Конфиг записан"
+    ok "Конфиг записан (порт: $port)"
+    
+    # Показываем содержимое конфига для проверки
+    info "Содержимое config.py:"
+    grep -v "^#" "${INSTALL_DIR}/config.py" | grep -v "^$" | sed 's/^/  /'
 }
 
 # ── Формирование полного секрета для ссылки ───────────────────────────────────
@@ -200,7 +215,7 @@ make_tls_link_secret() {
     echo "ee${base_secret}${domain_hex}"
 }
 
-# ── Systemd-сервис (запуск от root, но с ограничениями) ─────────────────────
+# ── Systemd-сервис ──────────────────────────────────────────────────────────
 create_service() {
     # Создаем пользователя если не существует
     if ! id -u mtproxy &>/dev/null; then
@@ -212,12 +227,6 @@ create_service() {
     chown -R mtproxy:mtproxy "$INSTALL_DIR"
     chmod 755 "$INSTALL_DIR"
     chmod 644 "${INSTALL_DIR}/config.py"
-
-    # Даем пользователю возможность использовать низкие порты (если нужно)
-    if [[ $SERVER_PORT -lt 1024 ]]; then
-        setcap 'cap_net_bind_service=+ep' /usr/bin/python3 || true
-        warn "Порт $SERVER_PORT ниже 1024, выданы дополнительные привилегии Python"
-    fi
 
     cat > "/etc/systemd/system/${SERVICE_NAME}.service" << EOF
 [Unit]
@@ -254,9 +263,9 @@ EOF
     sleep 3
 
     if systemctl is-active --quiet "${SERVICE_NAME}"; then
-        ok "Сервис запущен и добавлен в автозагрузку"
+        ok "✅ Сервис запущен и добавлен в автозагрузку"
     else
-        warn "Сервис завершился с ошибкой. Последние логи:"
+        warn "❌ Сервис завершился с ошибкой. Последние логи:"
         journalctl -u "${SERVICE_NAME}" -n 30 --no-pager
         fatal "Не удалось запустить mtproxy. Проверьте логи выше."
     fi
@@ -268,7 +277,7 @@ EOF
 main() {
     echo -e "${BOLD}"
     echo "╔══════════════════════════════════════════════╗"
-    echo "║     MTProxy — автоустановщик v1.8            ║"
+    echo "║     MTProxy — автоустановщик v1.9            ║"
     echo "║  Telegram MTProto + TLS (vk.com маскировка)  ║"
     echo "╚══════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -280,7 +289,7 @@ main() {
     [[ -n "$SERVER_IP" ]] || fatal "Не удалось определить публичный IP"
     ok "Публичный IP: $SERVER_IP"
 
-    hdr "Выбор порта"
+    hdr "Выбор порта (только >1024)"
     SERVER_PORT=$(pick_free_port)
     ok "Выбран порт: $SERVER_PORT"
 
@@ -340,6 +349,7 @@ EOF
     printf "  ${BOLD}%-12s${NC} %s\n" "Сервер:"    "$SERVER_IP"
     printf "  ${BOLD}%-12s${NC} %s\n" "Порт:"      "$SERVER_PORT"
     printf "  ${BOLD}%-12s${NC} %s\n" "TLS-домен:" "$TLS_DOMAIN"
+    printf "  ${BOLD}%-12s${NC} %s\n" "Секрет:"    "${PROXY_SECRET:0:16}... (обрезан)"
     echo ""
     echo -e "  ${BOLD}${YELLOW}📱 Ссылка для Telegram:${NC}"
     echo -e "  ${CYAN}${TG_LINK}${NC}"
@@ -353,6 +363,7 @@ EOF
         ok "✅ ПРОКСИ УСПЕШНО ЗАПУЩЕН И РАБОТАЕТ!"
         echo ""
         echo -e "  ${BOLD}Для проверки подключения используйте ссылку выше${NC}"
+        echo -e "  ${BOLD}Проверьте логи:${NC} journalctl -u mtproxy -f"
     else
         warn "❌ Прокси не запустился. Последние логи:"
         journalctl -u "${SERVICE_NAME}" -n 20 --no-pager
