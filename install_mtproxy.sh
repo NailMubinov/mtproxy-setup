@@ -13,7 +13,7 @@ CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 info()  { echo -e "${CYAN}[INFO]${NC}  $*"; }
 ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC}  $*" >&2; }   # >&2 — не попадает в $()
 fatal() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 hdr()   { echo -e "\n${BOLD}${CYAN}══ $* ══${NC}"; }
 
@@ -23,7 +23,7 @@ hdr()   { echo -e "\n${BOLD}${CYAN}══ $* ══${NC}"; }
 # ── Конфигурируемые параметры ─────────────────────────────────────────────────
 INSTALL_DIR="/opt/mtproxy"
 SERVICE_NAME="mtproxy"
-TLS_DOMAIN="yandex.ru"            # домен для TLS-маскировки
+TLS_DOMAIN="yandex.ru"
 CANDIDATE_PORTS=(443 8443 2083 2087 8080 8888 3128)
 
 # ── Определение публичного IP ─────────────────────────────────────────────────
@@ -56,23 +56,25 @@ open_firewall() {
     local port="$1"
     local opened=0
 
+    # ufw
     if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-        ufw allow "${port}/tcp" >/dev/null 2>&1
+        ufw allow "${port}/tcp" >/dev/null 2>&1 || true
         ok "ufw: порт $port открыт"
         opened=1
     fi
 
+    # firewalld
     if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
-        firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1
-        firewall-cmd --reload >/dev/null 2>&1
+        firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || true
+        firewall-cmd --reload >/dev/null 2>&1 || true
         ok "firewalld: порт $port открыт"
         opened=1
     fi
 
+    # iptables — || true везде, чтобы set -e не прерывал скрипт
     if command -v iptables &>/dev/null; then
         if ! iptables -C INPUT -p tcp --dport "$port" -j ACCEPT &>/dev/null; then
-            iptables -I INPUT -p tcp --dport "${port}" -j ACCEPT
-            # Сохраняем правило
+            iptables -I INPUT -p tcp --dport "${port}" -j ACCEPT || true
             if command -v netfilter-persistent &>/dev/null; then
                 netfilter-persistent save >/dev/null 2>&1 || true
             elif [[ -d /etc/iptables ]]; then
@@ -80,10 +82,14 @@ open_firewall() {
             fi
             ok "iptables: порт $port открыт"
             opened=1
+        else
+            ok "iptables: правило для порта $port уже существует"
+            opened=1
         fi
     fi
 
-    [[ $opened -eq 0 ]] && warn "Файрвол не обнаружен или правило уже существует"
+    [[ $opened -eq 0 ]] && warn "Файрвол не обнаружен, откройте порт $port вручную если нужно"
+    return 0
 }
 
 # ── Установка зависимостей ────────────────────────────────────────────────────
@@ -128,8 +134,6 @@ generate_secret() {
         domain_hex=$(python3 -c "import sys; print(sys.argv[1].encode().hex())" "$domain")
     fi
 
-    # Формат: "ee" + 16 random bytes hex + domain hex
-    # Это заставляет клиент Telegram маскировать трафик под TLS к указанному домену
     echo "ee${base_secret}${domain_hex}"
 }
 
@@ -144,8 +148,7 @@ write_config() {
 
 PORT = ${port}
 
-# TLS-секрет: маскировка трафика под HTTPS (fake-TLS)
-# Префикс "ee" + 16 байт + hex домена ${TLS_DOMAIN}
+# TLS-секрет: маскировка трафика под HTTPS (fake-TLS, домен ${TLS_DOMAIN})
 SECRET = "${secret}"
 
 # Раскомментируйте для нескольких пользователей с разными секретами:
@@ -200,7 +203,7 @@ EOF
 main() {
     echo -e "${BOLD}"
     echo "╔══════════════════════════════════════════════╗"
-    echo "║     MTProxy — автоустановщик v1.0            ║"
+    echo "║     MTProxy — автоустановщик v1.1            ║"
     echo "║  Telegram MTProto + TLS fake-domain masking  ║"
     echo "╚══════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -230,11 +233,9 @@ main() {
     hdr "Запуск сервиса"
     create_service
 
-    # Формируем ссылки
     TG_LINK="tg://proxy?server=${SERVER_IP}&port=${SERVER_PORT}&secret=${PROXY_SECRET}"
     TME_LINK="https://t.me/proxy?server=${SERVER_IP}&port=${SERVER_PORT}&secret=${PROXY_SECRET}"
 
-    # Сохраняем всё в файл
     INFO_FILE="${INSTALL_DIR}/proxy_info.txt"
     cat > "$INFO_FILE" << EOF
 MTProxy — данные подключения
@@ -258,7 +259,6 @@ ${TME_LINK}
   journalctl -u ${SERVICE_NAME} -f
 EOF
 
-    # ── Итоговый вывод ────────────────────────────────────────────────────────
     echo ""
     echo -e "${BOLD}${GREEN}"
     echo "╔══════════════════════════════════════════════════════════════════════╗"
