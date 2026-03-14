@@ -13,7 +13,7 @@ CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 info()  { echo -e "${CYAN}[INFO]${NC}  $*"; }
 ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC}  $*" >&2; }   # >&2 — не попадает в $()
+warn()  { echo -e "${YELLOW}[WARN]${NC}  $*" >&2; }
 fatal() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 hdr()   { echo -e "\n${BOLD}${CYAN}══ $* ══${NC}"; }
 
@@ -25,6 +25,55 @@ INSTALL_DIR="/opt/mtproxy"
 SERVICE_NAME="mtproxy"
 TLS_DOMAIN="yandex.ru"
 CANDIDATE_PORTS=(443 8443 2083 2087 8080 8888 3128)
+
+# ── Откат предыдущей установки ────────────────────────────────────────────────
+cleanup_previous() {
+    hdr "Откат предыдущей установки"
+    local found=0
+
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        systemctl stop "${SERVICE_NAME}"
+        ok "Сервис остановлен"
+        found=1
+    fi
+
+    if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        systemctl disable "${SERVICE_NAME}" >/dev/null 2>&1
+        found=1
+    fi
+
+    if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
+        rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+        systemctl daemon-reload
+        ok "Юнит удалён"
+        found=1
+    fi
+
+    if [[ -d "$INSTALL_DIR" ]]; then
+        # Сохраняем старый порт чтобы убрать из файрвола
+        local old_port=""
+        old_port=$(python3 -c "
+import re, sys
+try:
+    txt = open('${INSTALL_DIR}/config.py').read()
+    m = re.search(r'PORT\s*=\s*(\d+)', txt)
+    if m: print(m.group(1))
+except: pass
+" 2>/dev/null) || true
+
+        if [[ -n "$old_port" ]]; then
+            iptables -D INPUT -p tcp --dport "$old_port" -j ACCEPT 2>/dev/null || true
+            ok "Правило iptables для порта $old_port удалено"
+        fi
+
+        rm -rf "$INSTALL_DIR"
+        ok "Директория $INSTALL_DIR удалена"
+        found=1
+    fi
+
+    [[ $found -eq 0 ]] && info "Предыдущая установка не найдена, продолжаем"
+    return 0
+}
 
 # ── Определение публичного IP ─────────────────────────────────────────────────
 detect_ip() {
@@ -56,14 +105,12 @@ open_firewall() {
     local port="$1"
     local opened=0
 
-    # ufw
     if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
         ufw allow "${port}/tcp" >/dev/null 2>&1 || true
         ok "ufw: порт $port открыт"
         opened=1
     fi
 
-    # firewalld
     if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
         firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || true
         firewall-cmd --reload >/dev/null 2>&1 || true
@@ -71,7 +118,6 @@ open_firewall() {
         opened=1
     fi
 
-    # iptables — || true везде, чтобы set -e не прерывал скрипт
     if command -v iptables &>/dev/null; then
         if ! iptables -C INPUT -p tcp --dport "$port" -j ACCEPT &>/dev/null; then
             iptables -I INPUT -p tcp --dport "${port}" -j ACCEPT || true
@@ -109,15 +155,10 @@ install_deps() {
     ok "Зависимости установлены"
 }
 
-# ── Установка / обновление mtprotoproxy ───────────────────────────────────────
+# ── Установка mtprotoproxy ────────────────────────────────────────────────────
 install_proxy() {
     hdr "Установка mtprotoproxy"
-    if [[ -d "$INSTALL_DIR/.git" ]]; then
-        info "Обновляю существующую установку..."
-        git -C "$INSTALL_DIR" pull -q
-    else
-        git clone -q https://github.com/alexbers/mtprotoproxy.git "$INSTALL_DIR"
-    fi
+    git clone -q https://github.com/alexbers/mtprotoproxy.git "$INSTALL_DIR"
     ok "Репозиторий готов: $INSTALL_DIR"
 }
 
@@ -170,7 +211,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 ${INSTALL_DIR}/mtprotoproxy.py
+ExecStart=/usr/bin/python3 ${INSTALL_DIR}/mtprotoproxy.py ${INSTALL_DIR}/config.py
 WorkingDirectory=${INSTALL_DIR}
 Restart=always
 RestartSec=10
@@ -203,10 +244,13 @@ EOF
 main() {
     echo -e "${BOLD}"
     echo "╔══════════════════════════════════════════════╗"
-    echo "║     MTProxy — автоустановщик v1.1            ║"
+    echo "║     MTProxy — автоустановщик v1.2            ║"
     echo "║  Telegram MTProto + TLS fake-domain masking  ║"
     echo "╚══════════════════════════════════════════════╝"
     echo -e "${NC}"
+
+    # Откат предыдущей установки если есть
+    cleanup_previous
 
     hdr "Определение IP-адреса"
     SERVER_IP=$(detect_ip)
