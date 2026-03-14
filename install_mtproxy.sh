@@ -164,19 +164,24 @@ install_proxy() {
 
 # ── Генерация TLS-секрета ─────────────────────────────────────────────────────
 generate_secret() {
-    local domain="$1"
+    # В USERS кладём только "ee" + 16 байт (32 hex-символа)
+    # TLS_DOMAIN прокси подставляет сам при формировании ссылки
     local base_secret
     base_secret=$(openssl rand -hex 16)
+    echo "ee${base_secret}"
+}
 
+# Итоговый секрет для tg:// ссылки = ee + base + hex(domain)
+make_tls_link_secret() {
+    local base_secret="$1"   # ee + 32 hex
+    local domain="$2"
     local domain_hex
     if command -v xxd &>/dev/null; then
         domain_hex=$(printf '%s' "$domain" | xxd -p | tr -d '\n')
     else
         domain_hex=$(python3 -c "import sys; print(sys.argv[1].encode().hex())" "$domain")
     fi
-
-    # ee + 16 случайных байт + hex домена
-    echo "ee${base_secret}${domain_hex}"
+    echo "${base_secret}${domain_hex}"
 }
 
 # ── Запись конфига ────────────────────────────────────────────────────────────
@@ -267,8 +272,8 @@ main() {
     install_proxy
 
     hdr "Генерация секрета (TLS fake-domain: $TLS_DOMAIN)"
-    PROXY_SECRET=$(generate_secret "$TLS_DOMAIN")
-    ok "Секрет: $PROXY_SECRET"
+    PROXY_SECRET=$(generate_secret)
+    ok "Секрет (базовый): $PROXY_SECRET"
 
     hdr "Запись конфигурации"
     write_config "$SERVER_PORT" "$PROXY_SECRET" "$TLS_DOMAIN"
@@ -279,8 +284,9 @@ main() {
     hdr "Запуск сервиса"
     create_service
 
-    TG_LINK="tg://proxy?server=${SERVER_IP}&port=${SERVER_PORT}&secret=${PROXY_SECRET}"
-    TME_LINK="https://t.me/proxy?server=${SERVER_IP}&port=${SERVER_PORT}&secret=${PROXY_SECRET}"
+    LINK_SECRET=$(make_tls_link_secret "$PROXY_SECRET" "$TLS_DOMAIN")
+    TG_LINK="tg://proxy?server=${SERVER_IP}&port=${SERVER_PORT}&secret=${LINK_SECRET}"
+    TME_LINK="https://t.me/proxy?server=${SERVER_IP}&port=${SERVER_PORT}&secret=${LINK_SECRET}"
 
     INFO_FILE="${INSTALL_DIR}/proxy_info.txt"
     cat > "$INFO_FILE" << EOF
@@ -289,7 +295,8 @@ MTProxy — данные подключения
 
 Сервер:     ${SERVER_IP}
 Порт:       ${SERVER_PORT}
-Секрет:     ${PROXY_SECRET}
+Секрет (базовый): ${PROXY_SECRET}
+Секрет (ссылка):  ${LINK_SECRET}
 TLS-домен:  ${TLS_DOMAIN}
 
 tg:// ссылка (для мобильных клиентов):
